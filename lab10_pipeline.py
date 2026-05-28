@@ -13,7 +13,7 @@ def format_mb(num_bytes: int) -> float:
     return num_bytes / (1024 ** 2)
 
 
-def load_quantized_model(model_id: str):
+def load_quantized_model(model_id: str, attn_implementation: str | None = None):
     quant_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_compute_dtype=torch.float16,
@@ -21,11 +21,14 @@ def load_quantized_model(model_id: str):
 
     tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        quantization_config=quant_config,
-        device_map="auto",
-    )
+    model_kwargs = {
+        "quantization_config": quant_config,
+        "device_map": "auto",
+    }
+    if attn_implementation is not None:
+        model_kwargs["attn_implementation"] = attn_implementation
+
+    model = AutoModelForCausalLM.from_pretrained(model_id, **model_kwargs)
 
     return tokenizer, model
 
@@ -139,13 +142,42 @@ def run_step_3(model_id: str) -> None:
     print(f"Tamanho do texto de saida (chars): {len(generated_text)}")
 
 
+def run_step_4(model_id: str) -> None:
+    if not torch.cuda.is_available():
+        raise RuntimeError("Passo 4 exige GPU CUDA para medir VRAM e tempo.")
+
+    tokenizer, model = load_quantized_model(
+        model_id=model_id,
+        attn_implementation="flash_attention_2",
+    )
+    rag_context = build_fake_medical_context()
+    token_count = tokenizer(rag_context, return_tensors="pt")["input_ids"].shape[1]
+
+    elapsed, peak_vram_bytes, generated_text = benchmark_generation(
+        model=model,
+        tokenizer=tokenizer,
+        context_text=rag_context,
+        max_new_tokens=100,
+        use_cache=True,
+    )
+
+    print("=== Passo 4: Otimizacao com KV Cache + FlashAttention-2 ===")
+    print(f"Modelo: {model_id}")
+    print(f"Tokens no contexto de entrada: {token_count}")
+    print("use_cache: True")
+    print("attn_implementation: flash_attention_2")
+    print(f"Tempo total para gerar 100 tokens: {elapsed:.2f}s")
+    print(f"Pico de VRAM na geracao: {format_mb(peak_vram_bytes):.2f} MB")
+    print(f"Tamanho do texto de saida (chars): {len(generated_text)}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Laboratorio 10 - Pipeline RAG + QLoRA")
     parser.add_argument(
         "--step",
         type=int,
         default=1,
-        choices=[1, 2, 3],
+        choices=[1, 2, 3, 4],
         help="Passo a executar no momento.",
     )
     parser.add_argument(
@@ -162,6 +194,8 @@ def main() -> None:
         run_step_2(args.model_id)
     elif args.step == 3:
         run_step_3(args.model_id)
+    elif args.step == 4:
+        run_step_4(args.model_id)
 
 
 if __name__ == "__main__":
